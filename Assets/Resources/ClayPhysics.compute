@@ -1,0 +1,171 @@
+// ClayPhysics.compute
+#pragma kernel UpdateParticles
+#pragma kernel ApplyConstraints
+
+struct ClayParticle
+{
+    float3 position;
+    float3 velocity;
+    float3 force;
+    float mass;
+    float pressure;
+    float density;
+    int isDeformed;
+    float deformationAmount;
+    float3 originalPosition;
+};
+
+RWStructuredBuffer<ClayParticle> particles;
+float4x4 worldToLocal;
+float4x4 localToWorld;
+
+// Clay properties
+float elasticity;
+float plasticity;
+float viscosity;
+float particleRadius;
+float maxDeformation;
+float deltaTime;
+int particleCount;
+
+// Hand interaction
+float3 leftHandPos;
+float3 rightHandPos;
+float handInteractionRadius;
+float3 leftHandVelocity;
+float3 rightHandVelocity;
+
+// Bounds
+float3 boundsMin;
+float3 boundsMax;
+
+[numthreads(64, 1, 1)]
+void UpdateParticles(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= (uint)particleCount) return;
+    
+    ClayParticle particle = particles[index];
+    
+    // Integrate velocity
+    particle.velocity += (particle.force / particle.mass) * deltaTime;
+    
+    // Apply air resistance
+    particle.velocity *= 0.98;
+    
+    // Integrate position
+    particle.position += particle.velocity * deltaTime;
+    
+    // Constrain to bounds
+    float3 localPos = mul(worldToLocal, float4(particle.position, 1.0)).xyz;
+    
+    if (localPos.x < -0.6 || localPos.x > 0.6 ||
+        localPos.y < -0.6 || localPos.y > 0.6 ||
+        localPos.z < -0.6 || localPos.z > 0.6)
+    {
+        if (localPos.x < -0.6) { localPos.x = -0.6; particle.velocity.x *= -0.5; }
+        if (localPos.x > 0.6) { localPos.x = 0.6; particle.velocity.x *= -0.5; }
+        if (localPos.y < -0.6) { localPos.y = -0.6; particle.velocity.y *= -0.5; }
+        if (localPos.y > 0.6) { localPos.y = 0.6; particle.velocity.y *= -0.5; }
+        if (localPos.z < -0.6) { localPos.z = -0.6; particle.velocity.z *= -0.5; }
+        if (localPos.z > 0.6) { localPos.z = 0.6; particle.velocity.z *= -0.5; }
+        
+        particle.position = mul(localToWorld, float4(localPos, 1.0)).xyz;
+    }
+    
+    // Handle hand interactions
+    float3 handPos = leftHandPos;
+    float3 handVel = leftHandVelocity;
+    float distance = length(particle.position - handPos);
+    
+    if (distance < handInteractionRadius)
+    {
+        float3 direction = normalize(particle.position - handPos);
+        float forceMagnitude = (handInteractionRadius - distance) / handInteractionRadius;
+        
+        particle.isDeformed = 1;
+        particle.deformationAmount = max(particle.deformationAmount, forceMagnitude * maxDeformation);
+        
+        float3 pushForce = direction * forceMagnitude * 10.0;
+        particle.force += pushForce;
+        particle.velocity += handVel * 0.1;
+    }
+    
+    // Right hand interaction
+    handPos = rightHandPos;
+    handVel = rightHandVelocity;
+    distance = length(particle.position - handPos);
+    
+    if (distance < handInteractionRadius)
+    {
+        float3 direction = normalize(particle.position - handPos);
+        float forceMagnitude = (handInteractionRadius - distance) / handInteractionRadius;
+        
+        particle.isDeformed = 1;
+        particle.deformationAmount = max(particle.deformationAmount, forceMagnitude * maxDeformation);
+        
+        float3 pushForce = direction * forceMagnitude * 10.0;
+        particle.force += pushForce;
+        particle.velocity += handVel * 0.1;
+    }
+    
+    particles[index] = particle;
+}
+
+[numthreads(64, 1, 1)]
+void ApplyConstraints(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= (uint)particleCount) return;
+    
+    ClayParticle particleA = particles[index];
+    particleA.force = float3(0, 0, 0);
+    
+    // Check interactions with other particles
+    for (uint j = 0; j < (uint)particleCount; j++)
+    {
+        if (j == index) continue;
+        
+        ClayParticle particleB = particles[j];
+        float3 displacement = particleB.position - particleA.position;
+        float distance = length(displacement);
+        
+        if (distance < particleRadius * 2.0 && distance > 0.001)
+        {
+            float3 direction = normalize(displacement);
+            float overlap = (particleRadius * 2.0) - distance;
+            
+            // Elastic force
+            float3 elasticForce = direction * overlap * elasticity;
+            
+            // Plastic deformation check
+            float strain = overlap / (particleRadius * 2.0);
+            if (strain > plasticity)
+            {
+                particleA.isDeformed = 1;
+                particleA.deformationAmount = min(strain, maxDeformation);
+                elasticForce *= (1.0 - plasticity);
+            }
+            
+            // Viscosity damping
+            float3 relativeVelocity = particleB.velocity - particleA.velocity;
+            float3 viscousForce = relativeVelocity * viscosity * -1.0;
+            
+            particleA.force -= elasticForce + viscousForce;
+        }
+    }
+    
+    // Apply recovery
+    if (particleA.isDeformed == 1)
+    {
+        particleA.deformationAmount = lerp(particleA.deformationAmount, 0.0, deltaTime * 2.0 * 0.5);
+        
+        if (particleA.deformationAmount < 0.01)
+        {
+            particleA.isDeformed = 0;
+            particleA.deformationAmount = 0.0;
+        }
+    }
+    
+    particles[index] = particleA;
+}
