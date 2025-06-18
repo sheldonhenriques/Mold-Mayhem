@@ -49,17 +49,6 @@ public class Spring
         if (!p2.isPinned) p2.ApplyForce(totalForce);
     }
 
-    public void SolveConstraint()
-    {
-        Vector3 delta = p2.position - p1.position;
-        float dist = delta.magnitude;
-        float diff = (dist - restLength) / dist;
-        Vector3 correction = delta * 0.5f * diff * damping;
-
-        if (!p1.isPinned) p1.position += correction;
-        if (!p2.isPinned) p2.position -= correction;
-    }
-
     public void UpdateLine()
     {
         line.SetPosition(0, p1.position);
